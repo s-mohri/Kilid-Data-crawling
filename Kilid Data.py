@@ -1,61 +1,140 @@
 from selenium import webdriver
-import sqlite3
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
+import sqlite3
 import time
-service = Service(ChromeDriverManager().install())
+import datetime
 
-ch = webdriver.Chrome(service=service)
 
-db = sqlite3.connect('housing')
-cursor = db.cursor()
-query = 'CREATE TABLE IF NOT EXISTS details '\
-    '(ad_id INTEGER, '\
-    'published_date TIMESTAMP, '\
-    'description TEXT, '\
-    'price TEXT'\
-    'location TEXT, '\
-    'area TEXT, '\
-    'bedrooms TEXT, ' \
-    'url TEXT, ' \
-    'agency TEXT, ' \
-    'Building_age INTEGER, ' \
-    'PRIMARY KEY (ad_id))'
+def setup_database():
+    db = sqlite3.connect('housing.db')
+    cursor = db.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS details (
+        ad_id INTEGER PRIMARY KEY,
+        published_date TIMESTAMP,
+        description TEXT,
+        price REAL,
+        location TEXT,
+        area INTEGER,
+        bedrooms INTEGER,
+        url TEXT,
+        agency TEXT,
+        building_age INTEGER,
+        building_type TEXT
+    )
+    ''')
+    return db, cursor
 
-cursor.execute(query)
-url: str = "https://kilid.com/buy-apartment/tehran-shahrak_qarb"
-ch.maximize_window()
-ch.get(url)
-time.sleep(2)
-published_time = list()
-description = list()
-price = list()
-location = list()
-building_type = list()
-area = list()
-bedrooms = list()
-urls = list()
-ad_id = list()
-agency = list()
-building_age = list()
 
-info = ch.find_elements(By.XPATH, '//a[contains(@href, "detail")]')
+def fetch_data(ch):
+    url = "https://kilid.com/buy/tehran-satarkhan?listingTypeId=1&location=328363&sort=DATE_DESC&page=0"
+    ch.get(url)
+    time.sleep(2)
+    cards = ch.find_elements(By.XPATH, '//a[contains(@href, "detail")]')
 
-for elem in info:
-   temp = elem.text.split('\n')
-   agency.append(temp[-1])
-   # published_time.append(temp[1])
-   description.append(temp[2])
-   price.append(temp[3].strip('قیمت:'))
-   location.append(temp[4])
-   building_type.append(temp[5])
-   area.append(temp[6].strip('متر'))
-   bedrooms.append(temp[7].strip('خواب'))
+    data = {
+        'ad_id': [], 'published_date': [], 'description': [], 'price': [],
+        'location': [], 'area': [], 'bedrooms': [], 'url': [], 'agency': [],
+        'building_age': [], 'building_type': []
+    }
 
-urls = [elem.get_attribute('href') for elem in ch.find_elements(By.XPATH, '//a[contains(@href, "detail")]')]
-ad_id = [int(elem.get_attribute('href').split('/')[-1]) for elem in
-         ch.find_elements(By.XPATH, '//a[contains(@href, "detail")]')]
-db.commit()
-cursor.close()
-db.close()
+    for card in cards:
+        temp = card.text.split('\n')
+        if len(temp) >= 8:
+            data['ad_id'].append(int(card.get_attribute('href').split('/')[-1]))
+            data['published_date'].append(temp[0])
+            data['description'].append(temp[1])
+            data['price'].append(temp[2].strip('قیمت:').replace(',', ''))
+            data['location'].append(temp[3])
+            data['building_type'].append(temp[4])
+            data['area'].append(temp[5].strip('متر'))
+            if 'پارکینگ' in temp[6]:
+                data['bedrooms'].append(temp[7].strip('خواب'))
+            else:
+                data['bedrooms'].append(temp[6].strip('خواب'))
+            data['agency'].append(temp[-4])
+            data['building_age'].append(None)
+            data['url'].append(card.get_attribute('href'))
+
+    return data
+
+
+def process_dates(dates):
+    processed_dates = []
+    for date in dates:
+        parts = date.split(' ')
+        if 'ساعت' in parts:
+            delta = datetime.timedelta(hours=int(parts[0]))
+        elif 'روز' in parts:
+            delta = datetime.timedelta(days=int(parts[0]))
+        elif 'ماه' in parts:
+            delta = datetime.timedelta(days=30 * int(parts[0]))
+        else:
+            delta = datetime.timedelta(days=0)
+        processed_dates.append((datetime.datetime.utcnow() - delta).strftime('%Y-%m-%d'))
+    return processed_dates
+
+
+def process_prices(prices):
+    processed_prices = []
+    for price in prices:
+        parts = price.split(' ')
+        parts = [i for i in parts if i]
+        if len(parts) >= 2:
+            if parts[1] == 'میلیارد':
+                processed_prices.append(float(parts[0]))
+            elif parts[1] == 'میلیون':
+                processed_prices.append(float(parts[0]))
+            else:
+                processed_prices.append(0)
+        else:
+            processed_prices.append(0)
+    return processed_prices
+
+
+def save_to_database(cursor, data):
+    for i in range(len(data['ad_id'])):
+        cursor.execute('''
+        INSERT OR IGNORE INTO details (
+            ad_id, published_date, description, price, location,
+            area, bedrooms, url, agency, building_age, building_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data['ad_id'][i], data['published_date'][i], data['description'][i],
+            data['price'][i], data['location'][i], int(data['area'][i]),
+            int(data['bedrooms'][i]), data['url'][i], data['agency'][i],
+            10, data['building_type'][i]
+        ))
+
+
+def main():
+    # Setup WebDriver
+    service = Service(ChromeDriverManager().install())
+    ch = webdriver.Chrome(service=service)
+
+    try:
+        # Setup database
+        db, cursor = setup_database()
+
+        # Fetch data
+        data = fetch_data(ch)
+
+        # Process data
+        data['published_date'] = process_dates(data['published_date'])
+        data['price'] = process_prices(data['price'])
+
+        # Save data to database
+        save_to_database(cursor, data)
+
+        # Commit and close database
+        db.commit()
+        cursor.close()
+        db.close()
+    finally:
+        ch.quit()
+
+
+if __name__ == '__main__':
+    main()
